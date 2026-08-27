@@ -115,13 +115,12 @@ const CONFIG = {
   // Columns to search across.
   searchFields: ['General_Contractor_Name', 'Also_Known_As'],
 
-  // PDF field key -> column on the table. Only the GC name and
-  // address are filled on this sheet. Add more entries the same way
-  // if you want to fill additional fields later (see PDF_LAYOUT below
-  // for where to place them).
+  // PDF field key -> column on the table. Only GC name, address, and
+  // phone are filled on this sheet — no Date, per the current template.
   fieldMap: {
     gcName:  'General_Contractor_Name',
     address: 'Address',
+    phone:   'Phone_Number',
   },
 
   // Path (relative to this HTML file) to the fillable PDF template.
@@ -130,20 +129,28 @@ const CONFIG = {
 
 /* ================================================================
    PDF_LAYOUT — x/y coordinates (PDF points, origin bottom-left) for
-   each field on project_info_sheet_gc.pdf, which is the original
-   template with one addition: an "Address:" line under "Contact:"
-   in the GC column (there was no address field on the original
-   sheet). If you swap in a different template, re-measure these.
+   each field on project_info_sheet_gc.pdf (the mastercraftNEW
+   template — GC/Address/phone stacked in one box on the left, with
+   PROJECT/ARCH mirrored in a box on the right). Re-measure these if
+   you swap in a different template.
+
+   Each field auto-shrinks its font to fit maxWidth (down to
+   MIN_FONT_SIZE) before falling back to wrapping onto a couple of
+   lines for the rare value too long to shrink to a readable size.
    ================================================================ */
-const PAGE_HEIGHT = 792;
+const PAGE_HEIGHT = 720; // this template's page height, not 792
 function pdfY(distanceFromTop, pad = 2) {
   return PAGE_HEIGHT - distanceFromTop + pad;
 }
 
 const PDF_LAYOUT = {
-  gcName:  { x: 124, y: pdfY(156.7 + 14), maxWidth: 125, lineHeight: 13, minY: pdfY(199) },
-  address: { x: 140, y: pdfY(287.0), maxWidth: 340 },
+  gcName:  { x: 100, y: pdfY(101.3), maxWidth: 163 },
+  address: { x: 124, y: pdfY(154.8), maxWidth: 140, wrapLineHeight: 10, maxLines: 2 },
+  phone:   { x: 113, y: pdfY(220.2), maxWidth: 150 },
 };
+
+const BASE_FONT_SIZE = 10;
+const MIN_FONT_SIZE = 8; // floor before falling back to wrapping instead of shrinking further
 
 /* ================================================================
    STATE
@@ -302,7 +309,7 @@ function renderDetail() {
   const rows = Object.entries(CONFIG.fieldMap).map(([key, colId]) => {
     const val = record[colId];
     const display = (val === null || val === undefined || val === '')
-      ? '<span class="preview-value empty">(empty)</span>'
+      ? '<span class="preview-value empty">(empty — left blank on the PDF)</span>'
       : `<span class="preview-value">${escapeHtml(String(val))}</span>`;
     return `<tr><td class="preview-label">${escapeHtml(fieldLabel(key))}</td><td>${display}</td></tr>`;
   }).join('');
@@ -360,29 +367,37 @@ async function fillPdf(data) {
   const { PDFDocument, StandardFonts } = PDFLib;
   const pdfDoc = await PDFDocument.load(templateBytes);
   const page = pdfDoc.getPages()[0];
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const fontSize = 10;
+  // Times New Roman itself isn't embeddable (it's a licensed Monotype
+  // font, not freely redistributable) — PDF's built-in Times-Roman is
+  // the standard stand-in and is visually all but identical for this
+  // kind of form text.
+  const font = await pdfDoc.embedFont(StandardFonts.TimesRoman);
 
-  function draw(text, x, y, maxWidth) {
-    if (text === null || text === undefined || text === '') return;
+  // Draws text starting at (layout.x, layout.y), shrinking the font
+  // down to MIN_FONT_SIZE to stay within layout.maxWidth. If it's
+  // still too wide even at the floor size, wraps onto a couple of
+  // lines at the floor size instead of shrinking further into
+  // illegibility — keeps every field readable regardless of length.
+  function drawFit(text, layout) {
+    if (text === null || text === undefined || text === '') return; // leave blank, as requested
     const str = String(text);
-    let size = fontSize;
-    if (maxWidth) {
-      while (size > 6 && font.widthOfTextAtSize(str, size) > maxWidth) {
-        size -= 0.5;
-      }
-    }
-    page.drawText(str, { x, y, size, font });
-  }
 
-  function drawWrapped(text, layout) {
-    if (!text) return;
-    const words = String(text).split(/\s+/);
+    let size = BASE_FONT_SIZE;
+    while (size > MIN_FONT_SIZE && font.widthOfTextAtSize(str, size) > layout.maxWidth) {
+      size -= 0.5;
+    }
+    if (font.widthOfTextAtSize(str, size) <= layout.maxWidth) {
+      page.drawText(str, { x: layout.x, y: layout.y, size, font });
+      return;
+    }
+
+    size = MIN_FONT_SIZE;
+    const words = str.split(/\s+/);
     const lines = [];
     let line = '';
     for (const w of words) {
       const test = line ? line + ' ' + w : w;
-      if (font.widthOfTextAtSize(test, fontSize) > layout.maxWidth && line) {
+      if (font.widthOfTextAtSize(test, size) > layout.maxWidth && line) {
         lines.push(line);
         line = w;
       } else {
@@ -392,15 +407,16 @@ async function fillPdf(data) {
     if (line) lines.push(line);
 
     let y = layout.y;
-    for (const l of lines) {
-      if (layout.minY !== undefined && y < layout.minY) break;
-      page.drawText(l, { x: layout.x, y, size: fontSize, font });
-      y -= layout.lineHeight || 14;
+    const lineHeight = layout.wrapLineHeight || 10;
+    for (const l of lines.slice(0, layout.maxLines || 2)) {
+      page.drawText(l, { x: layout.x, y, size, font });
+      y -= lineHeight;
     }
   }
 
-  drawWrapped(data.gcName, PDF_LAYOUT.gcName);
-  draw(data.address, PDF_LAYOUT.address.x, PDF_LAYOUT.address.y, PDF_LAYOUT.address.maxWidth);
+  drawFit(data.gcName, PDF_LAYOUT.gcName);
+  drawFit(data.address, PDF_LAYOUT.address);
+  drawFit(data.phone, PDF_LAYOUT.phone);
 
   return pdfDoc.save();
 }
