@@ -153,6 +153,32 @@ const BASE_FONT_SIZE = 10;
 const MIN_FONT_SIZE = 8; // floor before falling back to wrapping instead of shrinking further
 
 /* ================================================================
+   MANUAL_FIELDS — everything on the sheet besides GC/Address/Phone
+   (which come from Grist) becomes a real, clickable PDF form field
+   in the downloaded file. Each one auto-sizes its font and centers
+   text as the person types, directly in their PDF viewer — no need
+   to come back to this widget to fill in the rest of the sheet.
+
+   top/bottom are measured the same way as PDF_LAYOUT above (distance
+   from the top of the page); width is the box width in points.
+   multiline allows text to wrap and lets the box hold more than one
+   line. Re-measure these if you swap in a different template.
+   ================================================================ */
+const MANUAL_FIELDS = [
+  { key: 'date',           label: 'Date',              x: 460, top: 15,  bottom: 29.1,  width: 62,  multiline: false },
+  { key: 'bonded',         label: 'Bonded',             x: 470, top: 37,  bottom: 48.9,  width: 53,  multiline: false },
+  { key: 'project',        label: 'Project',            x: 345, top: 88,  bottom: 117.6, width: 134, multiline: true  },
+  { key: 'archName',       label: 'Architect',          x: 325, top: 141, bottom: 168.8, width: 154, multiline: true  },
+  { key: 'archPhone',      label: 'Architect phone',    x: 325, top: 207, bottom: 222.5, width: 154, multiline: false },
+  { key: 'gcContact',      label: 'GC contact',         x: 117, top: 246, bottom: 275.2, width: 152, multiline: true  },
+  { key: 'archContact',    label: 'Architect contact',  x: 326, top: 246, bottom: 274.7, width: 153, multiline: true  },
+  { key: 'description',    label: 'Description',        x: 78,  top: 376, bottom: 599,   width: 391, multiline: true  },
+  { key: 'jobsitePhone',   label: 'Jobsite phone',      x: 163, top: 618, bottom: 634,   width: 114, multiline: false },
+  { key: 'jobsiteContact', label: 'Jobsite contact',    x: 329, top: 618, bottom: 634.5, width: 191, multiline: false },
+  { key: 'other',          label: 'Other',              x: 116, top: 648, bottom: 663,   width: 404, multiline: true  },
+];
+
+/* ================================================================
    STATE
    ================================================================ */
 const state = {
@@ -418,7 +444,50 @@ async function fillPdf(data) {
   drawFit(data.address, PDF_LAYOUT.address);
   drawFit(data.phone, PDF_LAYOUT.phone);
 
-  return pdfDoc.save();
+  addManualFields(pdfDoc, page, font);
+
+  // updateFieldAppearances defaults to true, which would bake a fixed
+  // computed font size into every field at save time — overwriting the
+  // "0 = auto" setting we just gave them. Turning it off keeps the
+  // fields genuinely auto-sizing/centering live in the person's PDF
+  // viewer as they type, instead of a size frozen at save time.
+  return pdfDoc.save({ updateFieldAppearances: false });
+}
+
+// Adds one real, clickable PDF form field per entry in MANUAL_FIELDS.
+// Each is centered and set to font size 0 ("auto") so PDF viewers
+// (Acrobat, Chrome's built-in viewer, etc.) grow or shrink the text
+// live to fit the box as the person types — the same "click a box,
+// type, it just fits" behavior as the baked-in GC fields, but left
+// blank for the person to fill in by hand.
+function addManualFields(pdfDoc, page, font) {
+  const { TextAlignment, PDFName, PDFBool, rgb } = PDFLib;
+  const form = pdfDoc.getForm();
+
+  for (const f of MANUAL_FIELDS) {
+    const height = f.bottom - f.top;
+    const rectY = pdfY(f.bottom);
+    const field = form.createTextField('manual_' + f.key);
+    if (f.multiline) field.enableMultiline();
+    field.setAlignment(TextAlignment.Center);
+    field.addToPage(page, {
+      x: f.x,
+      y: rectY,
+      width: f.width,
+      height,
+      font,
+      borderWidth: 1,
+      borderColor: rgb(0.7, 0.75, 0.73),
+      backgroundColor: rgb(0.976, 0.984, 0.980),
+    });
+    field.setFontSize(0); // 0 = auto-size, per the PDF spec
+  }
+
+  // Tells PDF viewers to regenerate each field's appearance live
+  // (font size/position) as the person edits it, rather than only
+  // once at save time — required for the auto-size behavior to work.
+  const acroForm = pdfDoc.catalog.lookup(PDFName.of('AcroForm'));
+  if (acroForm) acroForm.set(PDFName.of('NeedAppearances'), PDFBool.True);
 }
 
 function downloadBytes(bytes, filename) {
